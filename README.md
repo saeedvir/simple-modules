@@ -5,6 +5,8 @@ A simple structure for modularizing a Laravel project.
 ### [A powerful modular architecture package](https://github.com/saeedvir/laravel-modular)
 ### [AI Seo Tools](http://tools.azaran-code.ir/)
 ### [Azaran-code](http://azaran-code.ir/)
+### [Telegram Channel](https://t.me/DeveloperManifest)
+
 
 # add `ModuleServiceProvider.php` to `bootstrap\providers.php`
 ```
