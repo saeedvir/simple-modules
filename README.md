@@ -1,6 +1,11 @@
 # simple-modules
 A simple structure for modularizing a Laravel project.
 
+## See More
+### [A powerful modular architecture package](https://github.com/saeedvir/laravel-modular)
+### [AI Seo Tools](http://tools.azaran-code.ir/)
+### [Azaran-code](http://azaran-code.ir/)
+
 # add `ModuleServiceProvider.php` to `bootstrap\providers.php`
 ```
 use App\Providers\ModuleServiceProvider;
