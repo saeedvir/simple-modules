@@ -19,6 +19,13 @@ class ModuleServiceProvider extends ServiceProvider
     protected static array $moduleCache = [];
 
     /**
+     * Observers already registered, keyed by "ModelClass@ObserverClass".
+     *
+     * @var array<string, bool>
+     */
+    protected static array $registeredObservers = [];
+
+    /**
      * Filesystem instance (shared).
      */
     protected Filesystem $filesystem;
@@ -67,8 +74,6 @@ class ModuleServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        $this->filesystem = $this->app['files'];
-
         $modulesPath = $this->getModulesPath();
 
         if (! is_dir($modulesPath)) {
@@ -85,6 +90,7 @@ class ModuleServiceProvider extends ServiceProvider
             $this->registerModuleRoutes($modulePath);
             $this->registerModuleLivewireComponents($moduleName, $modulePath);
             $this->registerModuleObservers($moduleName, $modulePath);
+            $this->registerModuleCommands($moduleName, $modulePath);
         }
     }
 
@@ -133,7 +139,7 @@ class ModuleServiceProvider extends ServiceProvider
         $autoloader = $this->getAutoloader();
 
         // Map the root namespace to the module directory
-        $autoloader->addPsr4($namespace.'\\', $modulePath.DIRECTORY_SEPARATOR);
+        $autoloader->addPsr4($namespace . '\\', $modulePath . DIRECTORY_SEPARATOR);
 
         // Dynamically scan all first‑level subdirectories that are not
         // special infrastructure folders and add them as PSR‑4 prefixes.
@@ -172,12 +178,12 @@ class ModuleServiceProvider extends ServiceProvider
             }
 
             // Convert folder name to namespace (e.g. "Http/Controllers" → "Http\Controllers")
-            $relativePath = str_replace($modulePath.DIRECTORY_SEPARATOR, '', $subDir);
+            $relativePath = str_replace($modulePath . DIRECTORY_SEPARATOR, '', $subDir);
             $subNamespace = str_replace(DIRECTORY_SEPARATOR, '\\', $relativePath);
 
             $autoloader->addPsr4(
-                $namespace.'\\'.$subNamespace.'\\',
-                $subDir.DIRECTORY_SEPARATOR
+                $namespace . '\\' . $subNamespace . '\\',
+                $subDir . DIRECTORY_SEPARATOR
             );
         }
     }
@@ -185,7 +191,7 @@ class ModuleServiceProvider extends ServiceProvider
     /**
      * Return the Composer autoloader (singleton).
      */
-    protected function getAutoloader()
+    protected function getAutoloader(): ClassLoader
     {
         if (! isset($this->autoloader)) {
             $this->autoloader = require base_path('vendor/autoload.php');
@@ -207,8 +213,8 @@ class ModuleServiceProvider extends ServiceProvider
         }
 
         $lowerModuleName = Str::lower($moduleName);
-        $configPath = $modulePath.DIRECTORY_SEPARATOR.'config'
-            .DIRECTORY_SEPARATOR.$lowerModuleName.'.php';
+        $configPath = $modulePath . DIRECTORY_SEPARATOR . 'config'
+            . DIRECTORY_SEPARATOR . $lowerModuleName . '.php';
 
         if (file_exists($configPath)) {
             $this->mergeConfigFrom($configPath, $lowerModuleName);
@@ -217,8 +223,8 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleMigrations(string $modulePath): void
     {
-        $migrationPath = $modulePath.DIRECTORY_SEPARATOR.'database'
-            .DIRECTORY_SEPARATOR.'migrations';
+        $migrationPath = $modulePath . DIRECTORY_SEPARATOR . 'database'
+            . DIRECTORY_SEPARATOR . 'migrations';
 
         if (is_dir($migrationPath)) {
             $this->loadMigrationsFrom($migrationPath);
@@ -227,7 +233,7 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleLang(string $moduleName, string $modulePath): void
     {
-        $langPath = $modulePath.DIRECTORY_SEPARATOR.'lang';
+        $langPath = $modulePath . DIRECTORY_SEPARATOR . 'lang';
 
         if (is_dir($langPath)) {
             $this->loadTranslationsFrom($langPath, Str::lower($moduleName));
@@ -236,11 +242,54 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleViews(string $moduleName, string $modulePath): void
     {
-        $viewsPath = $modulePath.DIRECTORY_SEPARATOR.'resources'
-            .DIRECTORY_SEPARATOR.'views';
+        $viewsPath = $modulePath . DIRECTORY_SEPARATOR . 'resources'
+            . DIRECTORY_SEPARATOR . 'views';
 
         if (is_dir($viewsPath)) {
             $this->loadViewsFrom($viewsPath, Str::lower($moduleName));
+        }
+    }
+
+    protected function registerModuleCommands(string $moduleName, string $modulePath): void
+    {
+        $commandsPath = $modulePath . DIRECTORY_SEPARATOR . 'Console'
+            . DIRECTORY_SEPARATOR . 'Commands';
+
+        if (! is_dir($commandsPath)) {
+            return;
+        }
+
+        $namespace = "Modules\\{$moduleName}\\Console\\Commands";
+        $classes = [];
+
+        $this->collectCommandClasses($commandsPath, $namespace, $classes);
+
+        foreach ($classes as $className) {
+            if (class_exists($className)) {
+                $this->commands($className);
+            }
+        }
+    }
+
+    /**
+     * Recursively collect fully‑qualified class names of command files.
+     */
+    protected function collectCommandClasses(string $directory, string $namespace, array &$classes): void
+    {
+        $files = $this->filesystem->files($directory);
+
+        foreach ($files as $file) {
+            if ($file->getExtension() !== 'php') {
+                continue;
+            }
+
+            $classes[] = $namespace . '\\' . $file->getBasename('.php');
+        }
+
+        $subDirs = $this->filesystem->directories($directory);
+        foreach ($subDirs as $subDir) {
+            $subNamespace = $namespace . '\\' . basename($subDir);
+            $this->collectCommandClasses($subDir, $subNamespace, $classes);
         }
     }
 
@@ -248,52 +297,51 @@ class ModuleServiceProvider extends ServiceProvider
     //  Routes
     // -----------------------------------------------------------------
 
-protected function registerModuleRoutes(string $modulePath): void
-{
-    // Skip loading if routes are cached (they are already available)
-    if ($this->app->routesAreCached()) {
-        return;
-    }
+    protected function registerModuleRoutes(string $modulePath): void
+    {
+        if ($this->app->routesAreCached()) {
+            return;   // All routes are already in the cache
+        }
 
-    $routesDir = $modulePath.DIRECTORY_SEPARATOR.'routes';
+        $routesDir = $modulePath . DIRECTORY_SEPARATOR . 'routes';
 
-    if (! is_dir($routesDir)) {
-        return;
-    }
+        if (! is_dir($routesDir)) {
+            return;
+        }
 
-    // Web routes
-    $webRoutes = $routesDir.DIRECTORY_SEPARATOR.'web.php';
-    if (file_exists($webRoutes)) {
-        $this->app['router']
-            ->middleware(['web'])
-            ->group($webRoutes);
-    }
+        // Web routes
+        $webRoutes = $routesDir . DIRECTORY_SEPARATOR . 'web.php';
+        if (file_exists($webRoutes)) {
+            $this->app['router']
+                ->middleware(['web'])
+                ->group($webRoutes);
+        }
 
-    // API routes (without forced prefix)
-    $apiRoutes = $routesDir.DIRECTORY_SEPARATOR.'api.php';
-    if (file_exists($apiRoutes)) {
-        $apiMiddleware = config('modules.api_middleware', ['api']);
-        $this->app['router']
-            ->middleware($apiMiddleware)
-            ->group($apiRoutes);
-    }
+        // API routes – middleware group is configurable; no forced prefix
+        $apiRoutes = $routesDir . DIRECTORY_SEPARATOR . 'api.php';
+        if (file_exists($apiRoutes)) {
+            $apiMiddleware = config('modules.api_middleware', ['api']);
+            $this->app['router']
+                ->middleware($apiMiddleware)
+                ->group($apiRoutes);
+        }
 
-    // Legacy frontend routes
-    $frontendRoutes = $routesDir.DIRECTORY_SEPARATOR.'frontend.php';
-    if (file_exists($frontendRoutes)) {
-        $this->app['router']
-            ->middleware(['web'])
-            ->group($frontendRoutes);
-    }
+        // Legacy frontend routes
+        $frontendRoutes = $routesDir . DIRECTORY_SEPARATOR . 'frontend.php';
+        if (file_exists($frontendRoutes)) {
+            $this->app['router']
+                ->middleware(['web'])
+                ->group($frontendRoutes);
+        }
 
-    // AI / MCP routes – grouped with own middleware
-    $aiRoutes = $routesDir.DIRECTORY_SEPARATOR.'ai.php';
-    if (file_exists($aiRoutes)) {
-        $this->app['router']
-            //->middleware(config('modules.ai_middleware', ['api']))
-            ->group($aiRoutes);
+        // AI / MCP routes – now properly secured with configurable middleware
+        $aiRoutes = $routesDir . DIRECTORY_SEPARATOR . 'ai.php';
+        if (file_exists($aiRoutes)) {
+            $this->app['router']
+                ->middleware(config('modules.ai_middleware', ['api']))
+                ->group($aiRoutes);
+        }
     }
-}
 
     // -----------------------------------------------------------------
     //  Livewire Components
@@ -301,7 +349,7 @@ protected function registerModuleRoutes(string $modulePath): void
 
     protected function registerModuleLivewireComponents(string $moduleName, string $modulePath): void
     {
-        $livewirePath = $modulePath.DIRECTORY_SEPARATOR.'Livewire';
+        $livewirePath = $modulePath . DIRECTORY_SEPARATOR . 'Livewire';
 
         if (! is_dir($livewirePath)) {
             return;
@@ -324,7 +372,7 @@ protected function registerModuleRoutes(string $modulePath): void
                 continue;
             }
 
-            $className = $namespace.'\\'.$file->getFilenameWithoutExtension();
+            $className = $namespace . '\\' . $file->getFilenameWithoutExtension();
 
             if (! class_exists($className)) {
                 continue;
@@ -339,7 +387,7 @@ protected function registerModuleRoutes(string $modulePath): void
         // Recurse into subdirectories
         $directories = $this->filesystem->directories($directory);
         foreach ($directories as $subDir) {
-            $subNamespace = $namespace.'\\'.basename($subDir);
+            $subNamespace = $namespace . '\\' . basename($subDir);
             $this->scanAndRegisterLivewireComponents($subDir, $subNamespace);
         }
     }
@@ -365,10 +413,10 @@ protected function registerModuleRoutes(string $modulePath): void
         $livewireIndex = array_search('Livewire', $parts);
         if ($livewireIndex === false) {
             // Should not happen, but fallback
-            $componentParts = array_map(fn ($p) => Str::kebab($p), array_slice($parts, $moduleIndex + 2));
+            $componentParts = array_map(fn($p) => Str::kebab($p), array_slice($parts, $moduleIndex + 2));
         } else {
             $componentParts = array_map(
-                fn ($p) => Str::kebab($p),
+                fn($p) => Str::kebab($p),
                 array_slice($parts, $livewireIndex + 1)
             );
         }
@@ -382,7 +430,7 @@ protected function registerModuleRoutes(string $modulePath): void
 
     protected function registerModuleObservers(string $moduleName, string $modulePath): void
     {
-        $observersPath = $modulePath.DIRECTORY_SEPARATOR.'Observers';
+        $observersPath = $modulePath . DIRECTORY_SEPARATOR . 'Observers';
 
         if (! is_dir($observersPath)) {
             return;
@@ -407,8 +455,17 @@ protected function registerModuleRoutes(string $modulePath): void
             $observerClass = "{$namespace}\\Observers\\{$observerName}";
             $modelClass = "{$namespace}\\Models\\{$modelName}";
 
-            if (class_exists($observerClass) && class_exists($modelClass)) {
-                $modelClass::observe($observerClass);
+            if (
+                class_exists($observerClass) &&
+                class_exists($modelClass)
+            ) {
+                $key = $modelClass . '@' . $observerClass;
+
+                // Prevent duplicate registration (especially in long‑running processes)
+                if (! isset(self::$registeredObservers[$key])) {
+                    $modelClass::observe($observerClass);
+                    self::$registeredObservers[$key] = true;
+                }
             }
         }
     }
