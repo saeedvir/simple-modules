@@ -248,40 +248,52 @@ class ModuleServiceProvider extends ServiceProvider
     //  Routes
     // -----------------------------------------------------------------
 
-    protected function registerModuleRoutes(string $modulePath): void
-    {
-        $routesDir = $modulePath.DIRECTORY_SEPARATOR.'routes';
-
-        if (! is_dir($routesDir)) {
-            return;
-        }
-
-        // Web routes
-        $webRoutes = $routesDir.DIRECTORY_SEPARATOR.'web.php';
-        if (file_exists($webRoutes)) {
-            $this->app['router']
-                ->middleware(['web'])
-                ->group($webRoutes);
-        }
-
-        // API routes – middleware is now configurable (default: ['api'])
-        $apiRoutes = $routesDir.DIRECTORY_SEPARATOR.'api.php';
-        if (file_exists($apiRoutes)) {
-            $apiMiddleware = config('modules.api_middleware', ['api']);
-            $this->app['router']
-                ->prefix('api')
-                ->middleware($apiMiddleware)
-                ->group($apiRoutes);
-        }
-
-        // Legacy frontend routes (if still used)
-        $frontendRoutes = $routesDir.DIRECTORY_SEPARATOR.'frontend.php';
-        if (file_exists($frontendRoutes)) {
-            $this->app['router']
-                ->middleware(['web'])
-                ->group($frontendRoutes);
-        }
+protected function registerModuleRoutes(string $modulePath): void
+{
+    // Skip loading if routes are cached (they are already available)
+    if ($this->app->routesAreCached()) {
+        return;
     }
+
+    $routesDir = $modulePath.DIRECTORY_SEPARATOR.'routes';
+
+    if (! is_dir($routesDir)) {
+        return;
+    }
+
+    // Web routes
+    $webRoutes = $routesDir.DIRECTORY_SEPARATOR.'web.php';
+    if (file_exists($webRoutes)) {
+        $this->app['router']
+            ->middleware(['web'])
+            ->group($webRoutes);
+    }
+
+    // API routes (without forced prefix)
+    $apiRoutes = $routesDir.DIRECTORY_SEPARATOR.'api.php';
+    if (file_exists($apiRoutes)) {
+        $apiMiddleware = config('modules.api_middleware', ['api']);
+        $this->app['router']
+            ->middleware($apiMiddleware)
+            ->group($apiRoutes);
+    }
+
+    // Legacy frontend routes
+    $frontendRoutes = $routesDir.DIRECTORY_SEPARATOR.'frontend.php';
+    if (file_exists($frontendRoutes)) {
+        $this->app['router']
+            ->middleware(['web'])
+            ->group($frontendRoutes);
+    }
+
+    // AI / MCP routes – grouped with own middleware
+    $aiRoutes = $routesDir.DIRECTORY_SEPARATOR.'ai.php';
+    if (file_exists($aiRoutes)) {
+        $this->app['router']
+            //->middleware(config('modules.ai_middleware', ['api']))
+            ->group($aiRoutes);
+    }
+}
 
     // -----------------------------------------------------------------
     //  Livewire Components
