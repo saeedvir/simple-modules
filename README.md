@@ -66,7 +66,9 @@ modules/{ModuleName}/
 └── routes/
     ├── web.php             # Admin panel routes (auto-loaded)
     ├── api.php             # API routes (auto-loaded)
+    ├── ai.php              # AI Laravel MCP routes (auto-loaded)
     └── frontend.php        # Public frontend routes (auto-loaded)
+
 ```
 
 ---
