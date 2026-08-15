@@ -11,6 +11,8 @@ use Livewire\Livewire;
 
 class ModuleServiceProvider extends ServiceProvider
 {
+    private const MANIFEST_CACHE_KEY = 'modules-manifest';
+
     /**
      * Cache of discovered modules (name => path).
      *
@@ -82,6 +84,12 @@ class ModuleServiceProvider extends ServiceProvider
 
         $modules = $this->discoverModules($modulesPath);
 
+        if ($this->usesManifestCache()) {
+            $this->bootFromManifest();
+
+            return;
+        }
+
         foreach ($modules as $moduleName => $modulePath) {
             if (! $this->isModuleEnabled($moduleName)) {
                 continue;
@@ -91,6 +99,182 @@ class ModuleServiceProvider extends ServiceProvider
             $this->registerModuleLivewireComponents($moduleName, $modulePath);
             $this->registerModuleObservers($moduleName, $modulePath);
             $this->registerModuleCommands($moduleName, $modulePath);
+        }
+    }
+
+    protected function usesManifestCache(): bool
+    {
+        return $this->app->configurationIsCached() && $this->app->routesAreCached();
+    }
+
+    protected function bootFromManifest(): void
+    {
+        $manifest = $this->app['cache']->get(self::MANIFEST_CACHE_KEY);
+
+        if ($manifest === null) {
+            $manifest = $this->buildManifest();
+            $this->app['cache']->forever(self::MANIFEST_CACHE_KEY, $manifest);
+        }
+
+        $modulesPath = $this->getModulesPath();
+        $modules = $this->discoverModules($modulesPath);
+
+        foreach ($modules as $moduleName => $modulePath) {
+            if (! $this->isModuleEnabled($moduleName)) {
+                continue;
+            }
+
+            $this->registerModuleRoutes($modulePath);
+        }
+
+        foreach ($manifest['livewire'] ?? [] as $alias => $className) {
+            Livewire::component($alias, $className);
+        }
+
+        foreach ($manifest['observers'] ?? [] as $modelClass => $observerClass) {
+            if (! isset(self::$registeredObservers[$modelClass.'@'.$observerClass])) {
+                $modelClass::observe($observerClass);
+                self::$registeredObservers[$modelClass.'@'.$observerClass] = true;
+            }
+        }
+
+        foreach ($manifest['commands'] ?? [] as $className) {
+            if (class_exists($className)) {
+                $this->commands($className);
+            }
+        }
+    }
+
+    protected function buildManifest(): array
+    {
+        $modules = $this->discoverModules($this->getModulesPath());
+        $manifest = [
+            'livewire' => [],
+            'observers' => [],
+            'commands' => [],
+        ];
+
+        foreach ($modules as $moduleName => $modulePath) {
+            if (! $this->isModuleEnabled($moduleName)) {
+                continue;
+            }
+
+            $manifest['livewire'] = array_merge(
+                $manifest['livewire'],
+                $this->buildLivewireManifest($moduleName, $modulePath)
+            );
+
+            $manifest['observers'] = array_merge(
+                $manifest['observers'],
+                $this->buildObserverManifest($moduleName, $modulePath)
+            );
+
+            $manifest['commands'] = array_merge(
+                $manifest['commands'],
+                $this->buildCommandManifest($moduleName, $modulePath)
+            );
+        }
+
+        return $manifest;
+    }
+
+    protected function buildLivewireManifest(string $moduleName, string $modulePath): array
+    {
+        $livewirePath = $modulePath.DIRECTORY_SEPARATOR.'Livewire';
+
+        if (! is_dir($livewirePath)) {
+            return [];
+        }
+
+        $components = [];
+        $this->collectLivewireComponents($livewirePath, "Modules\\{$moduleName}\\Livewire", $components);
+
+        return $components;
+    }
+
+    protected function collectLivewireComponents(string $directory, string $namespace, array &$components): void
+    {
+        $files = $this->filesystem->files($directory);
+
+        foreach ($files as $file) {
+            if ($file->getExtension() !== 'php') {
+                continue;
+            }
+
+            $className = $namespace.'\\'.$file->getFilenameWithoutExtension();
+
+            if (! class_exists($className)) {
+                continue;
+            }
+
+            if ($this->isLivewireComponent($className)) {
+                $components[$this->generateLivewireAlias($className)] = $className;
+            }
+        }
+
+        $directories = $this->filesystem->directories($directory);
+        foreach ($directories as $subDir) {
+            $this->collectLivewireComponents($subDir, $namespace.'\\'.basename($subDir), $components);
+        }
+    }
+
+    protected function buildObserverManifest(string $moduleName, string $modulePath): array
+    {
+        $observersPath = $modulePath.DIRECTORY_SEPARATOR.'Observers';
+
+        if (! is_dir($observersPath)) {
+            return [];
+        }
+
+        $namespace = "Modules\\{$moduleName}";
+        $observers = [];
+
+        $files = $this->filesystem->files($observersPath);
+
+        foreach ($files as $file) {
+            if ($file->getExtension() !== 'php') {
+                continue;
+            }
+
+            $observerName = $file->getFilenameWithoutExtension();
+            $modelName = Str::replaceLast('Observer', '', $observerName);
+
+            if (empty($modelName)) {
+                continue;
+            }
+
+            $observerClass = "{$namespace}\\Observers\\{$observerName}";
+            $modelClass = "{$namespace}\\Models\\{$modelName}";
+
+            if (class_exists($observerClass) && class_exists($modelClass)) {
+                $observers[$modelClass] = $observerClass;
+            }
+        }
+
+        return $observers;
+    }
+
+    protected function buildCommandManifest(string $moduleName, string $modulePath): array
+    {
+        $commandsPath = $modulePath.DIRECTORY_SEPARATOR.'Console'
+            .DIRECTORY_SEPARATOR.'Commands';
+
+        if (! is_dir($commandsPath)) {
+            return [];
+        }
+
+        $namespace = "Modules\\{$moduleName}\\Console\\Commands";
+        $commands = [];
+
+        $this->collectCommandClasses($commandsPath, $namespace, $commands);
+
+        return $commands;
+    }
+
+    public static function clearManifestCache(): void
+    {
+        if (app()->bound('cache')) {
+            app('cache')->forget(self::MANIFEST_CACHE_KEY);
         }
     }
 
@@ -139,7 +323,7 @@ class ModuleServiceProvider extends ServiceProvider
         $autoloader = $this->getAutoloader();
 
         // Map the root namespace to the module directory
-        $autoloader->addPsr4($namespace . '\\', $modulePath . DIRECTORY_SEPARATOR);
+        $autoloader->addPsr4($namespace.'\\', $modulePath.DIRECTORY_SEPARATOR);
 
         // Dynamically scan all first‑level subdirectories that are not
         // special infrastructure folders and add them as PSR‑4 prefixes.
@@ -178,12 +362,12 @@ class ModuleServiceProvider extends ServiceProvider
             }
 
             // Convert folder name to namespace (e.g. "Http/Controllers" → "Http\Controllers")
-            $relativePath = str_replace($modulePath . DIRECTORY_SEPARATOR, '', $subDir);
+            $relativePath = str_replace($modulePath.DIRECTORY_SEPARATOR, '', $subDir);
             $subNamespace = str_replace(DIRECTORY_SEPARATOR, '\\', $relativePath);
 
             $autoloader->addPsr4(
-                $namespace . '\\' . $subNamespace . '\\',
-                $subDir . DIRECTORY_SEPARATOR
+                $namespace.'\\'.$subNamespace.'\\',
+                $subDir.DIRECTORY_SEPARATOR
             );
         }
     }
@@ -213,8 +397,8 @@ class ModuleServiceProvider extends ServiceProvider
         }
 
         $lowerModuleName = Str::lower($moduleName);
-        $configPath = $modulePath . DIRECTORY_SEPARATOR . 'config'
-            . DIRECTORY_SEPARATOR . $lowerModuleName . '.php';
+        $configPath = $modulePath.DIRECTORY_SEPARATOR.'config'
+            .DIRECTORY_SEPARATOR.$lowerModuleName.'.php';
 
         if (file_exists($configPath)) {
             $this->mergeConfigFrom($configPath, $lowerModuleName);
@@ -223,8 +407,8 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleMigrations(string $modulePath): void
     {
-        $migrationPath = $modulePath . DIRECTORY_SEPARATOR . 'database'
-            . DIRECTORY_SEPARATOR . 'migrations';
+        $migrationPath = $modulePath.DIRECTORY_SEPARATOR.'database'
+            .DIRECTORY_SEPARATOR.'migrations';
 
         if (is_dir($migrationPath)) {
             $this->loadMigrationsFrom($migrationPath);
@@ -233,7 +417,7 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleLang(string $moduleName, string $modulePath): void
     {
-        $langPath = $modulePath . DIRECTORY_SEPARATOR . 'lang';
+        $langPath = $modulePath.DIRECTORY_SEPARATOR.'lang';
 
         if (is_dir($langPath)) {
             $this->loadTranslationsFrom($langPath, Str::lower($moduleName));
@@ -242,8 +426,8 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleViews(string $moduleName, string $modulePath): void
     {
-        $viewsPath = $modulePath . DIRECTORY_SEPARATOR . 'resources'
-            . DIRECTORY_SEPARATOR . 'views';
+        $viewsPath = $modulePath.DIRECTORY_SEPARATOR.'resources'
+            .DIRECTORY_SEPARATOR.'views';
 
         if (is_dir($viewsPath)) {
             $this->loadViewsFrom($viewsPath, Str::lower($moduleName));
@@ -252,8 +436,8 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleCommands(string $moduleName, string $modulePath): void
     {
-        $commandsPath = $modulePath . DIRECTORY_SEPARATOR . 'Console'
-            . DIRECTORY_SEPARATOR . 'Commands';
+        $commandsPath = $modulePath.DIRECTORY_SEPARATOR.'Console'
+            .DIRECTORY_SEPARATOR.'Commands';
 
         if (! is_dir($commandsPath)) {
             return;
@@ -283,12 +467,12 @@ class ModuleServiceProvider extends ServiceProvider
                 continue;
             }
 
-            $classes[] = $namespace . '\\' . $file->getBasename('.php');
+            $classes[] = $namespace.'\\'.$file->getBasename('.php');
         }
 
         $subDirs = $this->filesystem->directories($directory);
         foreach ($subDirs as $subDir) {
-            $subNamespace = $namespace . '\\' . basename($subDir);
+            $subNamespace = $namespace.'\\'.basename($subDir);
             $this->collectCommandClasses($subDir, $subNamespace, $classes);
         }
     }
@@ -303,14 +487,14 @@ class ModuleServiceProvider extends ServiceProvider
             return;   // All routes are already in the cache
         }
 
-        $routesDir = $modulePath . DIRECTORY_SEPARATOR . 'routes';
+        $routesDir = $modulePath.DIRECTORY_SEPARATOR.'routes';
 
         if (! is_dir($routesDir)) {
             return;
         }
 
         // Web routes
-        $webRoutes = $routesDir . DIRECTORY_SEPARATOR . 'web.php';
+        $webRoutes = $routesDir.DIRECTORY_SEPARATOR.'web.php';
         if (file_exists($webRoutes)) {
             $this->app['router']
                 ->middleware(['web'])
@@ -318,7 +502,7 @@ class ModuleServiceProvider extends ServiceProvider
         }
 
         // API routes – middleware group is configurable; no forced prefix
-        $apiRoutes = $routesDir . DIRECTORY_SEPARATOR . 'api.php';
+        $apiRoutes = $routesDir.DIRECTORY_SEPARATOR.'api.php';
         if (file_exists($apiRoutes)) {
             $apiMiddleware = config('modules.api_middleware', ['api']);
             $this->app['router']
@@ -327,7 +511,7 @@ class ModuleServiceProvider extends ServiceProvider
         }
 
         // Legacy frontend routes
-        $frontendRoutes = $routesDir . DIRECTORY_SEPARATOR . 'frontend.php';
+        $frontendRoutes = $routesDir.DIRECTORY_SEPARATOR.'frontend.php';
         if (file_exists($frontendRoutes)) {
             $this->app['router']
                 ->middleware(['web'])
@@ -335,7 +519,7 @@ class ModuleServiceProvider extends ServiceProvider
         }
 
         // AI / MCP routes – now properly secured with configurable middleware
-        $aiRoutes = $routesDir . DIRECTORY_SEPARATOR . 'ai.php';
+        $aiRoutes = $routesDir.DIRECTORY_SEPARATOR.'ai.php';
         if (file_exists($aiRoutes)) {
             $this->app['router']
                 ->middleware(config('modules.ai_middleware', ['api']))
@@ -349,7 +533,7 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleLivewireComponents(string $moduleName, string $modulePath): void
     {
-        $livewirePath = $modulePath . DIRECTORY_SEPARATOR . 'Livewire';
+        $livewirePath = $modulePath.DIRECTORY_SEPARATOR.'Livewire';
 
         if (! is_dir($livewirePath)) {
             return;
@@ -372,7 +556,7 @@ class ModuleServiceProvider extends ServiceProvider
                 continue;
             }
 
-            $className = $namespace . '\\' . $file->getFilenameWithoutExtension();
+            $className = $namespace.'\\'.$file->getFilenameWithoutExtension();
 
             if (! class_exists($className)) {
                 continue;
@@ -387,7 +571,7 @@ class ModuleServiceProvider extends ServiceProvider
         // Recurse into subdirectories
         $directories = $this->filesystem->directories($directory);
         foreach ($directories as $subDir) {
-            $subNamespace = $namespace . '\\' . basename($subDir);
+            $subNamespace = $namespace.'\\'.basename($subDir);
             $this->scanAndRegisterLivewireComponents($subDir, $subNamespace);
         }
     }
@@ -413,10 +597,10 @@ class ModuleServiceProvider extends ServiceProvider
         $livewireIndex = array_search('Livewire', $parts);
         if ($livewireIndex === false) {
             // Should not happen, but fallback
-            $componentParts = array_map(fn($p) => Str::kebab($p), array_slice($parts, $moduleIndex + 2));
+            $componentParts = array_map(fn ($p) => Str::kebab($p), array_slice($parts, $moduleIndex + 2));
         } else {
             $componentParts = array_map(
-                fn($p) => Str::kebab($p),
+                fn ($p) => Str::kebab($p),
                 array_slice($parts, $livewireIndex + 1)
             );
         }
@@ -430,7 +614,7 @@ class ModuleServiceProvider extends ServiceProvider
 
     protected function registerModuleObservers(string $moduleName, string $modulePath): void
     {
-        $observersPath = $modulePath . DIRECTORY_SEPARATOR . 'Observers';
+        $observersPath = $modulePath.DIRECTORY_SEPARATOR.'Observers';
 
         if (! is_dir($observersPath)) {
             return;
@@ -459,7 +643,7 @@ class ModuleServiceProvider extends ServiceProvider
                 class_exists($observerClass) &&
                 class_exists($modelClass)
             ) {
-                $key = $modelClass . '@' . $observerClass;
+                $key = $modelClass.'@'.$observerClass;
 
                 // Prevent duplicate registration (especially in long‑running processes)
                 if (! isset(self::$registeredObservers[$key])) {
@@ -501,6 +685,7 @@ class ModuleServiceProvider extends ServiceProvider
     public static function clearCache(): void
     {
         self::$moduleCache = [];
+        self::clearManifestCache();
     }
 
     public static function getAllModules(): array
