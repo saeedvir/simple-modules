@@ -3,6 +3,7 @@
 namespace App\Console\Commands\Module;
 
 use App\Providers\ModuleServiceProvider;
+use App\Support\ModuleLifecycle;
 use Illuminate\Console\Command;
 
 class ModuleDisableCommand extends Command
@@ -23,6 +24,12 @@ class ModuleDisableCommand extends Command
             return self::FAILURE;
         }
 
+        if (ModuleLifecycle::isProtected($name)) {
+            $this->error("Module [{$name}] is protected and cannot be disabled.");
+
+            return self::FAILURE;
+        }
+
         $disabled = config('modules.disabled', []);
 
         if (in_array($name, $disabled)) {
@@ -32,27 +39,15 @@ class ModuleDisableCommand extends Command
         }
 
         $disabled[] = $name;
-        sort($disabled);
 
-        $this->updateConfig($disabled);
+        ModuleLifecycle::writeDisabledConfig($disabled);
 
-        $this->info("Module [{$name}] disabled. Run 'php artisan config:clear' to apply.");
-
-        return self::SUCCESS;
-    }
-
-    protected function updateConfig(array $disabled): void
-    {
-        $configPath = base_path('config/modules.php');
-
-        $content = "<?php\n\nreturn [\n    /*\n    |--------------------------------------------------------------------------\n    | Disabled Modules\n    |--------------------------------------------------------------------------\n    |\n    | List module names (PascalCase) to disable them. Disabled modules are\n    | not loaded, their routes/migrations/config/views are all skipped.\n    |\n    */\n\n    'disabled' => [\n";
-
-        foreach ($disabled as $name) {
-            $content .= "        '{$name}',\n";
+        if (! ModuleLifecycle::runHook($name, 'disable', $this)) {
+            return self::FAILURE;
         }
 
-        $content .= "    ],\n];\n";
+        $this->info("Module [{$name}] disabled.");
 
-        file_put_contents($configPath, $content);
+        return self::SUCCESS;
     }
 }

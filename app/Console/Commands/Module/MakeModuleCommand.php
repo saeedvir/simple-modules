@@ -133,6 +133,8 @@ class MakeModuleCommand extends Command
             if ($generateAll || $this->option('provider')) {
                 $this->createModuleProvider($name, $modulePath);
             }
+
+            $this->createLifecycleHooks($name, $modulePath, $tableName ?? '');
         } catch (\Throwable $e) {
             // Rollback: delete the entire module directory if an error occurs
             if (is_dir($modulePath)) {
@@ -150,6 +152,7 @@ class MakeModuleCommand extends Command
 
         $this->line('Directory structure:');
         $this->line("  modules/{$name}/");
+        $this->line('    ├── .init/ (_enable.php, _disable.php, _remove.php)');
         $this->line('    ├── Console/Commands/');
         $this->line('    ├── Enums/');
         $this->line('    ├── Helpers/');
@@ -523,5 +526,118 @@ class {$name}ServiceProvider extends ServiceProvider
 
         $this->files->put($providerPath, $content);
         $this->info("  Provider [{$name}ServiceProvider] created.");
+    }
+
+    /**
+     * Scaffold the lifecycle hooks executed by module:enable/disable/remove.
+     *
+     * Hooks work through the Schema/DB facades only. Extend `$tables` as the
+     * module grows, and add any extra cleanup (menu rows, settings, files)
+     * to the _remove hook.
+     */
+    protected function createLifecycleHooks(string $name, string $modulePath, string $tableName): void
+    {
+        $initPath = $modulePath.'/.init';
+
+        if (! is_dir($initPath)) {
+            $this->files->makeDirectory($initPath, recursive: true);
+        }
+
+        $tablesList = $tableName !== '' ? "['{$tableName}']" : '[]';
+        $tablesHint = $tableName !== '' ? '' : " // Add owned tables here, e.g. 'my_table',";
+
+        $removeContent = <<<PHP
+<?php
+
+// Module lifecycle hook: {$name}/_remove.php
+// Executed by `php artisan module:remove {$name}` (via App\Support\\ModuleLifecycle).
+// Available: \$command (Illuminate\\Console\\Command). Must stay idempotent.
+
+use Illuminate\\Support\\Facades\\DB;
+use Illuminate\\Support\\Facades\\Schema;
+
+\$tables = {$tablesList};{$tablesHint}
+\$modelLike = 'Modules\\\\{$name}\\\\%';
+
+try {
+    Schema::disableForeignKeyConstraints();
+
+    foreach (\$tables as \$table) {
+        if (Schema::hasTable(\$table)) {
+            Schema::drop(\$table);
+            \$command->info("Dropped table [{\$table}].");
+        }
+    }
+} finally {
+    Schema::enableForeignKeyConstraints();
+}
+
+if (\$tables !== [] && Schema::hasTable('migrations')) {
+    \$query = DB::table('migrations');
+
+    foreach (\$tables as \$table) {
+        \$query->orWhere('migration', 'like', "%{\$table}%");
+    }
+
+    \$command->info('Removed ['.\$query->delete().'] migration ledger row(s).');
+}
+
+// Delete orphan rows that reference this module's models (media, audit
+// logs, ...). Add anything else this module owns (menu rows, settings,
+// files) here.
+foreach (['media' => 'model_type', 'audit_logs' => 'auditable_type'] as \$table => \$column) {
+    if (Schema::hasTable(\$table)) {
+        DB::table(\$table)->where(\$column, 'like', \$modelLike)->delete();
+    }
+}
+
+if (class_exists('App\\\\Providers\\\\ModuleServiceProvider')) {
+    \\App\\Providers\\ModuleServiceProvider::clearCache();
+}
+
+\$command->info('{$name} data removed.');
+
+PHP;
+
+        $this->files->put($initPath.'/_remove.php', $removeContent);
+
+        $enableContent = <<<PHP
+<?php
+
+// Module lifecycle hook: {$name}/_enable.php
+// Executed by `php artisan module:enable {$name}` (via App\Support\\ModuleLifecycle).
+// Re-create anything the _disable hook removed, then flush caches.
+// Available: \$command (Illuminate\\Console\\Command). Must stay idempotent.
+
+if (class_exists('App\\\\Providers\\\\ModuleServiceProvider')) {
+    \\App\\Providers\\ModuleServiceProvider::clearCache();
+}
+
+\$command->info('{$name} enabled.');
+
+PHP;
+
+        $this->files->put($initPath.'/_enable.php', $enableContent);
+
+        $disableContent = <<<PHP
+<?php
+
+// Module lifecycle hook: {$name}/_disable.php
+// Executed by `php artisan module:disable {$name}` (via App\Support\\ModuleLifecycle).
+// Remove generated rows/caches so nothing points at the disabled module.
+// Tables and data are kept.
+// Available: \$command (Illuminate\\Console\\Command). Must stay idempotent.
+
+if (class_exists('App\\\\Providers\\\\ModuleServiceProvider')) {
+    \\App\\Providers\\ModuleServiceProvider::clearCache();
+}
+
+\$command->info('{$name} disabled (tables kept).');
+
+PHP;
+
+        $this->files->put($initPath.'/_disable.php', $disableContent);
+
+        $this->info('  Lifecycle hooks [.init/_enable.php, _disable.php, _remove.php] created.');
     }
 }

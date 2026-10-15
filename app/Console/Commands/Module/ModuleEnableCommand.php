@@ -3,6 +3,7 @@
 namespace App\Console\Commands\Module;
 
 use App\Providers\ModuleServiceProvider;
+use App\Support\ModuleLifecycle;
 use Illuminate\Console\Command;
 
 class ModuleEnableCommand extends Command
@@ -31,27 +32,22 @@ class ModuleEnableCommand extends Command
             return self::SUCCESS;
         }
 
-        $disabled = array_values(array_diff($disabled, [$name]));
+        ModuleLifecycle::writeDisabledConfig(array_values(array_diff($disabled, [$name])));
 
-        $this->updateConfig($disabled);
+        $this->call('migrate', ['--force' => true]);
 
-        $this->info("Module [{$name}] enabled. Run 'php artisan config:clear' to apply.");
+        $migrationPath = "modules/{$name}/database/migrations";
 
-        return self::SUCCESS;
-    }
-
-    protected function updateConfig(array $disabled): void
-    {
-        $configPath = base_path('config/modules.php');
-
-        $content = "<?php\n\nreturn [\n    /*\n    |--------------------------------------------------------------------------\n    | Disabled Modules\n    |--------------------------------------------------------------------------\n    |\n    | List module names (PascalCase) to disable them. Disabled modules are\n    | not loaded, their routes/migrations/config/views are all skipped.\n    |\n    */\n\n    'disabled' => [\n";
-
-        foreach ($disabled as $name) {
-            $content .= "        '{$name}',\n";
+        if (is_dir(base_path($migrationPath))) {
+            $this->call('migrate', ['--path' => $migrationPath, '--force' => true]);
         }
 
-        $content .= "    ],\n];\n";
+        if (! ModuleLifecycle::runHook($name, 'enable', $this)) {
+            return self::FAILURE;
+        }
 
-        file_put_contents($configPath, $content);
+        $this->info("Module [{$name}] enabled.");
+
+        return self::SUCCESS;
     }
 }

@@ -27,6 +27,8 @@ Pure Laravel modular system (no third-party packages). Modules live in `modules/
 |------|---------|
 | `app/Providers/ModuleServiceProvider.php` | Auto-discovers, registers, and boots all modules |
 | `app/Console/Commands/MakeModuleCommand.php` | `make:module` Artisan command |
+| `app/Console/Commands/Module/ModuleRemoveCommand.php` | `module:remove` Artisan command |
+| `app/Support/ModuleLifecycle.php` | Runs per-module lifecycle hooks (`.init/`) |
 | `bootstrap/providers.php` | Registers `ModuleServiceProvider` |
 | `modules/` | Root directory for all modules |
 
@@ -38,6 +40,7 @@ Every module follows this directory layout:
 
 ```
 modules/{ModuleName}/
+├── .init/                   # Lifecycle hooks (_enable.php, _disable.php, _remove.php)
 ├── Console/
 │   └── Commands/           # Artisan commands
 ├── Enums/                  # PHP 8.1 backed enums
@@ -354,6 +357,9 @@ return [
         'Blog',
         // 'Shop',
     ],
+    'protected' => [
+        // 'Core', // can never be disabled or removed
+    ],
 ];
 ```
 
@@ -362,6 +368,7 @@ return [
 ```bash
 php artisan module:disable Shop
 php artisan module:enable Shop
+php artisan module:remove Shop --force
 php artisan config:clear
 ```
 
@@ -378,13 +385,37 @@ php artisan config:clear
 
 ---
 
+## Module Lifecycle Hooks (`.init/`)
+
+Every module ships executable hooks in `modules/{Name}/.init/`
+(scaffolded automatically by `make:module`):
+
+| File | Run By | Does |
+|------|--------|------|
+| `_enable.php` | `module:enable` | Re-creates anything the disable hook removed, flushes caches |
+| `_disable.php` | `module:disable` | Removes generated rows/caches so nothing points at the disabled module; tables and data are kept |
+| `_remove.php` | `module:remove` | Drops owned tables (FK-safe), deletes migration ledger rows and orphan model references, then the directory is deleted |
+
+Hooks are plain PHP executed with `$command`
+(`Illuminate\Console\Command`) in scope via
+`App\Support\ModuleLifecycle::runHook()`.
+A missing hook is a warning; a failing hook aborts the command.
+
+**Hook contract:**
+- Idempotent — safe to run twice (guard everything with `Schema::hasTable()` / `exists()` checks).
+- Facades only (`Schema`, `DB`) — no cross-module class imports.
+- `module:enable` also runs `migrate --force` plus the module's own `migrate --path=...` before its hook, so re-enabled modules rebuild tables.
+
+---
+
 ## Quick Reference
 
 | Action | Command / Method |
 |--------|-----------------|
 | Create module | `php artisan make:module {Name} --all --provider` |
-| Enable module | `php artisan module:enable {Name}` |
-| Disable module | `php artisan module:disable {Name}` |
+| Enable module | `php artisan module:enable {Name}` (migrates + runs `.init/_enable.php`) |
+| Disable module | `php artisan module:disable {Name}` (runs `.init/_disable.php`, keeps tables) |
+| Remove module | `php artisan module:remove {Name} --force` (runs `.init/_remove.php`, deletes directory; refuses `protected` modules) |
 | Clear module cache | `ModuleServiceProvider::clearCache()` |
 | List discovered modules | `ModuleServiceProvider::getAllModules()` |
 | Access module config | `config('{module}.key')` |

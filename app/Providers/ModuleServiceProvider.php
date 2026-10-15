@@ -342,6 +342,7 @@ class ModuleServiceProvider extends ServiceProvider
 
         // Folders that should NOT be mapped as separate namespaces
         $excluded = [
+            '.init',
             'config',
             'database',
             'routes',

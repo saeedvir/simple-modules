@@ -13,4 +13,17 @@ return [
 
     'disabled' => [
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Protected Modules
+    |--------------------------------------------------------------------------
+    |
+    | Modules that can never be disabled or removed (e.g. Core, User).
+    | The module:disable and module:remove commands refuse them.
+    |
+    */
+
+    'protected' => [
+    ],
 ];
